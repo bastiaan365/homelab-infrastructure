@@ -1,0 +1,184 @@
+# =============================================================================
+# Suricata Configuration Overrides for Homelab
+# =============================================================================
+# This file contains local overrides applied on top of the default Suricata
+# configuration managed by OPNsense. Place this in the OPNsense custom config
+# directory or apply via the Suricata plugin's "advanced" settings.
+#
+# OPNsense Suricata plugin path: /usr/local/etc/suricata/custom.yaml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Network Variables
+# ---------------------------------------------------------------------------
+# Define the home network to match all internal VLAN subnets.
+# This ensures Suricata correctly identifies internal vs external traffic.
+
+vars:
+  address-groups:
+    HOME_NET: "[10.10.10.0/24,10.10.20.0/24,10.10.30.0/24,10.10.40.0/24,10.10.50.0/24,10.10.60.0/24,10.10.70.0/24]"
+    EXTERNAL_NET: "!$HOME_NET"
+
+    # Servers within the homelab that should be treated as high-value targets
+    DNS_SERVERS: "[10.10.10.1,10.10.20.1,10.10.30.1,10.10.40.1,10.10.50.1,10.10.60.1,10.10.70.1]"
+    HTTP_SERVERS: "$HOME_NET"
+    SMTP_SERVERS: "$HOME_NET"
+
+  port-groups:
+    HTTP_PORTS: "80"
+    SHELLCODE_PORTS: "!80"
+    SSH_PORTS: "22"
+    DNS_PORTS: "53"
+
+# ---------------------------------------------------------------------------
+# Rule Sources
+# ---------------------------------------------------------------------------
+# Enable Emerging Threats Open ruleset (community edition, GPLv2).
+# ET Open provides solid coverage for malware, exploits, and policy violations.
+
+default-rule-path: /var/lib/suricata/rules
+
+rule-files:
+  - suricata.rules            # ET Open combined ruleset (managed by suricata-update)
+  - custom-rules/homelab.rules  # Local custom rules for homelab-specific detections
+
+# ---------------------------------------------------------------------------
+# Suricata Engine Mode
+# ---------------------------------------------------------------------------
+# Run in IPS (inline) mode on internal interfaces. Suricata is deployed on
+# the LAN-side interfaces because ISP fiber quirks prevent WAN-side deployment.
+#
+# Note: OPNsense configures the actual netmap/IPS inline mode via its plugin.
+# These thresholds control engine behavior when in IPS mode.
+
+# Stream engine settings tuned for IPS reliability
+stream:
+  memcap: 256mb              # Memory cap for stream tracking
+  checksum-validation: no     # Disable checksum validation (offloaded by NIC)
+  reassembly:
+    memcap: 512mb            # Memory cap for stream reassembly
+    depth: 1mb               # Max reassembly depth per stream
+    toserver-chunk-size: 2560
+    toclient-chunk-size: 2560
+
+# ---------------------------------------------------------------------------
+# Detection Engine Tuning
+# ---------------------------------------------------------------------------
+detect:
+  profile: medium             # Balance between memory usage and performance
+  sgh-mpm-context: auto       # Auto-select multi-pattern matcher
+  inspection-recursion-limit: 3000
+
+# Threshold configuration to reduce alert fatigue
+# Alerts that fire more than 10 times in 60 seconds from the same source
+# are suppressed for the remainder of that window.
+threshold-file: /usr/local/etc/suricata/threshold.config
+
+# ---------------------------------------------------------------------------
+# EVE JSON Logging
+# ---------------------------------------------------------------------------
+# EVE (Extensible Event Format) outputs structured JSON logs that feed into
+# the TIG monitoring stack via Telegraf on the Monitoring VLAN.
+
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: /var/log/suricata/eve.json
+
+      # Rotate logs to prevent disk exhaustion on the firewall appliance
+      rotate-interval: day
+      rotate-size: 100mb
+
+      # Log types to capture
+      types:
+        # Security alerts from signature matching
+        - alert:
+            payload: yes            # Include packet payload (base64)
+            payload-printable: yes  # Include printable payload representation
+            packet: yes             # Include full packet data
+            metadata: yes           # Include rule metadata (classtype, CVE, etc.)
+            tagged-packets: yes     # Log packets related to tagged sessions
+
+        # HTTP request/response metadata (no body content)
+        - http:
+            extended: yes           # Include all HTTP headers
+
+        # DNS query and response logging
+        - dns:
+            query: yes
+            answer: yes
+
+        # TLS handshake metadata (certificate info, JA3/JA4 fingerprints)
+        - tls:
+            extended: yes
+
+        # File transaction metadata (detected file transfers)
+        - files:
+            force-magic: yes        # Always determine file type via libmagic
+            force-hash: [md5, sha256]  # Compute hashes for file identification
+
+        # Flow records (connection metadata similar to NetFlow)
+        - flow
+
+        # SSH protocol metadata
+        - ssh
+
+        # Anomaly events (protocol violations, decode errors)
+        - anomaly:
+            enabled: yes
+            types:
+              decode: yes
+              stream: yes
+              applayer: yes
+
+        # Suricata engine stats (performance counters)
+        - stats:
+            totals: yes
+            threads: no
+            deltas: yes
+
+  # Additionally log alerts in fast format for quick triage
+  - fast:
+      enabled: yes
+      filename: /var/log/suricata/fast.log
+      append: yes
+
+# ---------------------------------------------------------------------------
+# Performance Tuning
+# ---------------------------------------------------------------------------
+# The Topton N355 has 4 cores. Allocate workers across available CPUs.
+
+threading:
+  set-cpu-affinity: no        # Let the OS scheduler handle CPU assignment
+  detect-thread-ratio: 1.0    # 1 detect thread per capture thread
+
+# Defragmentation engine
+defrag:
+  memcap: 64mb
+  max-frags: 65535
+  prealloc: yes
+  timeout: 60
+
+# Application layer protocol detection
+app-layer:
+  protocols:
+    tls:
+      enabled: yes
+      detection-ports:
+        dp: 443
+      ja3-fingerprints: yes     # Enable JA3 fingerprinting for TLS client profiling
+
+    http:
+      enabled: yes
+
+    dns:
+      enabled: yes
+      # Log all DNS traffic, not just on port 53, to catch DNS tunneling
+      detection-ports:
+        dp: 53
+        dp-range: "5353, 8053, 8853"
+
+    ssh:
+      enabled: yes
+      hassh: yes                # Enable HASSH fingerprinting for SSH clients/servers

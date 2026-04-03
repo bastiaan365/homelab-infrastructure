@@ -1,0 +1,84 @@
+# =============================================================================
+# WireGuard Configuration - Mullvad VPN Tunnel (wg0)
+# =============================================================================
+# This is an example configuration for the WireGuard tunnel used to route
+# LAN and Management traffic through Mullvad VPN. Actual keys and endpoints
+# are replaced with placeholders.
+#
+# Kill switch approach:
+#   - AllowedIPs = 0.0.0.0/0 routes ALL traffic through the tunnel.
+#   - OPNsense firewall rules block non-VPN internet traffic on LAN/Mgmt
+#     interfaces, so if the tunnel goes down, traffic is dropped entirely
+#     rather than leaking to the ISP connection.
+#   - The only exception is the tunnel endpoint itself, which must be
+#     reachable via the WAN gateway to establish the tunnel.
+#
+# OPNsense integration:
+#   - Configured via System > WireGuard in the OPNsense GUI.
+#   - The wg0 interface is assigned as the VPN gateway.
+#   - Gateway monitoring pings 10.64.0.1 (Mullvad internal) to detect
+#     tunnel failures and trigger kill switch behavior.
+# =============================================================================
+
+[Interface]
+# Private key for this WireGuard peer (OPNsense firewall)
+# Generate with: wg genkey
+PrivateKey = PLACEHOLDER_PRIVATE_KEY_BASE64
+
+# Tunnel IP assigned by Mullvad (from account dashboard)
+Address = 10.64.100.1/32
+
+# DNS is handled by OPNsense Unbound, not by the tunnel
+# DNS = (intentionally omitted - Unbound handles all DNS)
+
+# MTU tuned for typical ISP fiber connections
+# Default WireGuard MTU is 1420; adjust if you see fragmentation issues
+MTU = 1420
+
+# Optional: run a script on tunnel state changes for logging
+# PostUp = /usr/local/bin/wg-up.sh
+# PostDown = /usr/local/bin/wg-down.sh
+
+[Peer]
+# Mullvad server public key (from Mullvad server list)
+PublicKey = PLACEHOLDER_SERVER_PUBLIC_KEY_BASE64
+
+# Mullvad endpoint - choose a server close to your location
+# Format: <server-hostname>:<port>
+# Mullvad supports ports 51820 (default) and 53 (firewall bypass)
+Endpoint = PLACEHOLDER_MULLVAD_SERVER:51820
+
+# Route ALL traffic through the tunnel (kill switch component 1)
+# Combined with firewall rules that block non-VPN egress (component 2),
+# this ensures no traffic leaks if the tunnel drops.
+AllowedIPs = 0.0.0.0/0
+
+# Send keepalive every 25 seconds to maintain NAT mappings
+# Mullvad recommends 25s for residential connections
+PersistentKeepalive = 25
+
+# =============================================================================
+# Kill Switch Implementation (OPNsense firewall side)
+# =============================================================================
+# The kill switch is NOT just the AllowedIPs = 0.0.0.0/0 setting above.
+# It requires complementary firewall rules on OPNsense:
+#
+# 1. LAN interface rules:
+#    - PASS: LAN net -> VPN gateway (all traffic)
+#    - PASS: LAN net -> Monitoring net (metrics/dashboards)
+#    - BLOCK: LAN net -> WAN gateway (prevents ISP leak)
+#
+# 2. Outbound NAT:
+#    - Manual outbound NAT rule mapping LAN net to the WireGuard interface
+#    - No outbound NAT rule for LAN net on the WAN interface
+#
+# 3. Gateway monitoring:
+#    - Monitor IP: 10.64.0.1 (Mullvad internal gateway)
+#    - If monitoring fails, the VPN gateway is marked as down
+#    - Since no WAN fallback rule exists, traffic is simply dropped
+#
+# This three-layer approach ensures:
+#    - Normal operation: traffic flows through VPN
+#    - Tunnel down: traffic is blocked (not leaked)
+#    - Tunnel recovery: traffic automatically resumes through VPN
+# =============================================================================
